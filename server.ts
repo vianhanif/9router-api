@@ -19,6 +19,11 @@ import {
   getConsoleLogs,
   getConsoleEmitter,
   clearConsoleLogs,
+  getSettings,
+  startHeadroomProxy,
+  stopHeadroomProxy,
+  DEFAULT_HEADROOM_URL,
+  isLoopbackHeadroomUrl,
 } from './src/exports.js';
 
 const require = createRequire(import.meta.url);
@@ -210,8 +215,72 @@ app.get('/v1/models', async (req, res) => {
   });
 });
 
+// === Headroom Proxy Lifecycle ===
+
+// Start the headroom compression proxy if enabled in settings.
+const startHeadroomIfEnabled = async () => {
+  try {
+    const settings = await getSettings();
+    if (!settings.headroomEnabled) {
+      console.log('[Headroom] Disabled in settings, skipping auto-start');
+      return;
+    }
+    const url = (settings as any).headroomUrl || DEFAULT_HEADROOM_URL;
+    if (!isLoopbackHeadroomUrl(url)) {
+      console.log('[Headroom] External proxy configured, skipping auto-start');
+      return;
+    }
+    const port = (() => {
+      try {
+        const p = parseInt(new URL(url).port, 10);
+        return p > 0 && p < 65536 ? p : 8787;
+      } catch { return 8787; }
+    })();
+    const result = await startHeadroomProxy({
+      port,
+      codeAware: (settings as any).headroomCodeAware === true,
+      kompress: (settings as any).headroomKompress === true,
+    });
+    if (result.alreadyRunning) {
+      console.log(`[Headroom] Proxy already running (pid=${result.pid})`);
+    } else {
+      console.log(`[Headroom] Proxy started (pid=${result.pid})`);
+    }
+  } catch (error) {
+    const code = (error as any).code;
+    if (code === 'NOT_INSTALLED') {
+      console.warn('[Headroom] headroom-ai not installed, skipping auto-start');
+    } else {
+      console.error('[Headroom] Failed to start proxy:', (error as Error).message);
+    }
+  }
+};
+
+// Stop the headroom proxy on shutdown, then exit.
+let shuttingDown = false;
+const shutdown = (signal: string) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[9Router API] Received ${signal}, shutting down`);
+  try {
+    const result = stopHeadroomProxy();
+    if (result.stopped) {
+      console.log(`[Headroom] Proxy stopped (pid=${result.pid})`);
+    } else {
+      console.log(`[Headroom] Proxy not running (${result.reason})`);
+    }
+  } catch (error) {
+    console.error('[Headroom] Failed to stop proxy:', (error as Error).message);
+  }
+  process.exit(0);
+};
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
 // === Start Server ===
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[9Router API] Running on port ${PORT} (api-only mode)`);
+  void startHeadroomIfEnabled();
 });

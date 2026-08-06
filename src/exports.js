@@ -34,6 +34,17 @@ export {
   clearConsoleLogs,
 } from '@/lib/consoleLogBuffer.js';
 
+// Headroom proxy lifecycle
+export {
+  startHeadroomProxy,
+  stopHeadroomProxy,
+} from '@/lib/headroom/process.js';
+
+export {
+  DEFAULT_HEADROOM_URL,
+  isLoopbackHeadroomUrl,
+} from '@/lib/headroom/detect.js';
+
 // open-sse core
 export { getExecutor, hasSpecializedExecutor } from 'open-sse/index.js';
 export { handleChatCore } from 'open-sse/handlers/chatCore.js';
