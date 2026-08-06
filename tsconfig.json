@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "paths": {
+      "@/*": ["../9router/src/*"],
+      "open-sse/*": ["../9router/open-sse/*"]
+    }
+  }
+}
