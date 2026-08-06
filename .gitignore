@@ -1,0 +1,24 @@
+# Node.js
+node_modules/
+*.log
+npm-debug.log*
+
+# Build/Dist
+dist/
+build/
+out/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Multi-agent Worktrees
+.worktrees/
