@@ -21,6 +21,9 @@ import {
   clearConsoleLogs,
 } from './src/exports.js';
 
+const require = createRequire(import.meta.url);
+const packageJson = require('./package.json');
+
 const app = express();
 const PORT = process.env.PORT || 20127;
 
@@ -45,7 +48,7 @@ app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
     mode: 'api-only',
-    version: require('./package.json').version,
+    version: packageJson.version,
     timestamp: new Date().toISOString(),
   });
 });
