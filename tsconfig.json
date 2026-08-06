@@ -5,7 +5,8 @@
     "moduleResolution": "bundler",
     "paths": {
       "@/*": ["../9router/src/*"],
-      "open-sse/*": ["../9router/open-sse/*"]
+      "open-sse/*": ["../9router/open-sse/*"],
+      "9router/*": ["../9router/*"]
     }
   }
 }
