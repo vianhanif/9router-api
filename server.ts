@@ -132,8 +132,67 @@ app.get('/api/translator/console-logs', (req, res) => {
 
 // === LLM API Endpoints ===
 
+// Wrapper to convert Express request to Web API Request format
+const wrapExpressRequest = async (req, res, handler) => {
+  try {
+    // Create a Web API Request-like object from Express request
+    const webRequest = {
+      url: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
+      headers: {
+        get: (name) => req.get(name),
+        entries: () => Object.entries(req.headers),
+      },
+      json: async () => req.body, // Express already parsed the body
+    };
+
+    const response = await handler(webRequest);
+    
+    // Handle response object
+    if (response && typeof response.clone === 'function') {
+      // It's a Response object (streaming or otherwise)
+      const contentType = response.headers?.get?.('content-type') || 'application/json';
+      const status = response.status || 200;
+      
+      res.status(status).setHeader('Content-Type', contentType);
+      
+      // Check if it's a streaming response
+      if (contentType.includes('text/event-stream')) {
+        // Stream the response body
+        const reader = response.body?.getReader();
+        if (reader) {
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              res.write(value);
+            }
+          } finally {
+            res.end();
+          }
+        } else {
+          res.end();
+        }
+      } else {
+        // Non-streaming response - return as JSON or text
+        const text = await response.text();
+        try {
+          res.json(JSON.parse(text));
+        } catch {
+          res.send(text);
+        }
+      }
+    } else {
+      // Fallback: return as-is
+      res.json(response);
+    }
+  } catch (error) {
+    console.error('[Server Error]', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
 // OpenAI-compatible chat completions
-app.post('/v1/chat/completions', handleChat);
+app.post('/v1/chat/completions', (req, res) => wrapExpressRequest(req, res, handleChat));
 
 // Also handle /v1/chat/completions with GET for CORS preflight
 app.options('/v1/chat/completions', (req, res) => {
