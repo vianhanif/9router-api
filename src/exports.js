@@ -40,6 +40,9 @@ export {
   stopHeadroomProxy,
 } from '@/lib/headroom/process.js';
 
+// MCP gateway
+export { handleJsonRpc } from '@/lib/mcp/gateway/handler.js';
+
 export {
   DEFAULT_HEADROOM_URL,
   isLoopbackHeadroomUrl,

@@ -26,6 +26,12 @@ import {
   isLoopbackHeadroomUrl,
 } from './src/exports.js';
 
+import {
+  postMcpGateway,
+  getMcpGateway,
+  shutdownStdioChildren,
+} from './src/mcpGateway.js';
+
 const require = createRequire(import.meta.url);
 const packageJson = require('./package.json');
 
@@ -215,6 +221,11 @@ app.get('/v1/models', async (req, res) => {
   });
 });
 
+// === MCP Gateway ===
+
+app.post('/api/mcp-gateway', postMcpGateway);
+app.get('/api/mcp-gateway', getMcpGateway);
+
 // === Headroom Proxy Lifecycle ===
 
 // Start the headroom compression proxy if enabled in settings.
@@ -272,6 +283,7 @@ const shutdown = (signal: string) => {
   } catch (error) {
     console.error('[Headroom] Failed to stop proxy:', (error as Error).message);
   }
+  shutdownStdioChildren();
   process.exit(0);
 };
 
