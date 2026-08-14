@@ -4,6 +4,7 @@
 
 // LLM API handlers
 export { handleChat } from '@/sse/handlers/chat.js';
+export { markAccountUnavailable, clearAccountError } from "@/sse/services/auth.js";
 
 // Database layer
 export {
