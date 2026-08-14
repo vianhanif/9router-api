@@ -203,7 +203,8 @@ const wrapExpressRequest = async (req, res, handler) => {
 };
 
 // OpenAI-compatible chat completions
-app.post('/v1/chat/completions', (req, res) => wrapExpressRequest(req, res, handleChat));
+import { supervisedHandleChat } from './src/supervisedExecutor.js';
+app.post('/v1/chat/completions', (req, res) => wrapExpressRequest(req, res, supervisedHandleChat));
 
 // Also handle /v1/chat/completions with GET for CORS preflight
 app.options('/v1/chat/completions', (req, res) => {
