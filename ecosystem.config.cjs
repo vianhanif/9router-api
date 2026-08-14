@@ -2,7 +2,7 @@ module.exports = {
   apps: [
     {
       name: '9r-api',
-cwd: process.env.HOME + '/Documents/alvian/9router-api',
+      cwd: process.env.HOME + '/Documents/alvian/9router-api',
       script: 'npm',
       args: 'start',
       env: {
