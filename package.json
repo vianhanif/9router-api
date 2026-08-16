@@ -1,6 +1,6 @@
 {
   "name": "9router-api",
-  "version": "0.5.50",
+  "version": "0.5.55",
   "description": "Standalone 9Router API server - lightweight LLM proxy without dashboard UI",
   "private": true,
   "type": "module",
