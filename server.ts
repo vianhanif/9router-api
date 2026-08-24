@@ -274,11 +274,11 @@ const startHeadroomIfEnabled = async () => {
         return p > 0 && p < 65536 ? p : 8787;
       } catch { return 8787; }
     })();
-    const result = await startHeadroomProxy({
-      port,
-      codeAware: (settings as any).headroomCodeAware === true,
-      kompress: (settings as any).headroomKompress === true,
-    });
+    // NOTE: startHeadroomProxy no longer accepts codeAware/kompress — 9router
+    // dropped the --code-aware/--disable-kompress proxy flags (see 9router
+    // fix/headroom-cli-flags). Compress extras are configured inside the
+    // headroom proxy itself going forward.
+    const result = await startHeadroomProxy({ port });
     if (result.alreadyRunning) {
       console.log(`[Headroom] Proxy already running (pid=${result.pid})`);
     } else {
