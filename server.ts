@@ -30,6 +30,7 @@ import {
   stopHeadroomProxy,
   DEFAULT_HEADROOM_URL,
   isLoopbackHeadroomUrl,
+  probeProxyRunning,
 } from './src/exports.js';
 
 import {
@@ -37,6 +38,12 @@ import {
   getMcpGateway,
   shutdownStdioChildren,
 } from './src/mcpGateway.js';
+
+// Headroom compression shim: re-implements the removed headroom-ai
+// `/v1/compress` HTTP contract in-process, backed by the headroom-ai Python
+// library. Installed AFTER the open-sse fetch patch (server.ts imports
+// '9router/open-sse/index.js' first) so it composes on top of it.
+import { initHeadroomCompressShim, stopCompressWorker } from './src/headroomCompressShim.js';
 
 const require = createRequire(import.meta.url);
 const packageJson = require('./package.json');
@@ -46,6 +53,9 @@ const PORT = process.env.PORT || 20127;
 
 // Initialize console log capture for SSE streaming
 initConsoleLogCapture();
+
+// Headroom /v1/compress shim (must run after the open-sse fetch patch above)
+initHeadroomCompressShim();
 
 // Parse JSON bodies
 app.use(express.json({ limit: '50mb' }));
@@ -248,6 +258,16 @@ const startHeadroomIfEnabled = async () => {
       console.log('[Headroom] External proxy configured, skipping auto-start');
       return;
     }
+    // Guard: if a proxy is already reachable at the configured URL, do NOT
+    // spawn another one. Spawning into an occupied port makes the headroom
+    // CLI exit early; the core's startup watcher then double-closes the log
+    // fd and crashes the whole API process (EBADF), observed in production.
+    // probeProxyRunning comes from 9router detect.js (re-exported via
+    // src/exports.js per repo convention) — same /health probe, no duplicate.
+    if (await probeProxyRunning(url)) {
+      console.log(`[Headroom] Proxy already reachable at ${url}, skipping auto-start`);
+      return;
+    }
     const port = (() => {
       try {
         const p = parseInt(new URL(url).port, 10);
@@ -291,6 +311,7 @@ const shutdown = (signal: string) => {
     console.error('[Headroom] Failed to stop proxy:', (error as Error).message);
   }
   shutdownStdioChildren();
+  stopCompressWorker();
   process.exit(0);
 };
 

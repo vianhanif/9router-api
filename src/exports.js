@@ -47,6 +47,8 @@ export { handleJsonRpc } from '@/lib/mcp/gateway/handler.js';
 export {
   DEFAULT_HEADROOM_URL,
   isLoopbackHeadroomUrl,
+  findPython310,
+  probeProxyRunning,
 } from '@/lib/headroom/detect.js';
 
 // open-sse core
