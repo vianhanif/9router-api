@@ -6,6 +6,12 @@
  * the dashboard UI, for lighter resource usage.
  */
 
+// Register the better-sqlite3 resolve hook FIRST: 9router's source files load
+// `better-sqlite3` lazily, and this hook redirects them to this project's copy
+// (pinned to a version with a Node 26 prebuilt binary) instead of the broken
+// install inside the 9router repo.
+import './src/sqlite-binding-hook.mjs';
+
 import express from 'express';
 import { createRequire } from 'module';
 
