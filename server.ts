@@ -161,6 +161,15 @@ app.get('/api/translator/console-logs', (req, res) => {
 
 // Wrapper to convert Express request to Web API Request format
 const wrapExpressRequest = async (req, res, handler) => {
+  // Client-abort propagation: when the downstream client disconnects, abort
+  // the upstream stream so we stop draining tokens instead of continuing to
+  // generate into a closed socket.
+  const abortController = new AbortController();
+  res.on('close', () => {
+    // 'close' also fires after a normal finish; only abort on real disconnects.
+    if (!res.writableEnded) abortController.abort();
+  });
+
   try {
     // Create a Web API Request-like object from Express request
     const webRequest = {
@@ -170,6 +179,7 @@ const wrapExpressRequest = async (req, res, handler) => {
         entries: () => Object.entries(req.headers),
       },
       json: async () => req.body, // Express already parsed the body
+      signal: abortController.signal,
     };
 
     const response = await handler(webRequest);
@@ -187,14 +197,41 @@ const wrapExpressRequest = async (req, res, handler) => {
         // Stream the response body
         const reader = response.body?.getReader();
         if (reader) {
+          const onAbort = () => {
+            try { reader.cancel(); } catch { /* already closed */ }
+          };
+          if (abortController.signal.aborted) {
+            onAbort();
+          } else {
+            abortController.signal.addEventListener('abort', onAbort, { once: true });
+          }
           try {
             while (true) {
               const { done, value } = await reader.read();
               if (done) break;
               res.write(value);
             }
+          } catch (streamError) {
+            if (!abortController.signal.aborted) {
+              // Upstream stream terminated with an error. Append a final SSE
+              // error event before closing so the agent sees a structured
+              // failure instead of a silent EOF.
+              try {
+                const payload = JSON.stringify({
+                  error: {
+                    message: `upstream stream error: ${String((streamError as Error)?.message || streamError)}`,
+                    type: 'upstream_error',
+                    code: 'stream_interrupted',
+                  },
+                });
+                res.write(`data: ${payload}\n\n`);
+              } catch {
+                // Headers/stream already closed — best-effort only.
+              }
+            }
           } finally {
-            res.end();
+            abortController.signal.removeEventListener('abort', onAbort);
+            try { res.end(); } catch { /* socket already closed */ }
           }
         } else {
           res.end();
@@ -214,9 +251,51 @@ const wrapExpressRequest = async (req, res, handler) => {
     }
   } catch (error) {
     console.error('[Server Error]', error);
-    res.status(500).json({ error: 'Internal server error' });
+    if (abortController.signal.aborted || res.writableEnded) return; // client gone
+    const { status, type, code, message } = classifyError(error);
+    try {
+      res.status(status).json({
+        error: { message, type, code, param: null },
+      });
+    } catch {
+      // Socket already closed — nothing to send.
+    }
   }
 };
+
+/**
+ * Convert an arbitrary thrown error into an OpenAI-style error envelope.
+ * Preserves provider status codes (404 model, 401 auth, 5xx upstream) so
+ * agents can decide whether to retry, switch models, or surface the error.
+ */
+function classifyError(error: unknown) {
+  const err = (error ?? {}) as Record<string, unknown>;
+  const message = String(err.message || error || 'Internal server error');
+  const status = typeof err.status === 'number'
+    ? (err.status as number)
+    : typeof err.statusCode === 'number'
+      ? (err.statusCode as number)
+      : 500;
+  const safeStatus = status >= 400 && status < 600 ? status : 500;
+  const lower = message.toLowerCase();
+  let type = safeStatus >= 500 ? 'server_error' : 'invalid_request_error';
+  let code = safeStatus >= 500 ? 'provider_unavailable' : 'request_error';
+  if (lower.includes('unauthorized') || lower.includes('forbidden') ||
+      lower.includes('no credentials') || lower.includes('no active credentials')) {
+    type = 'authentication_error';
+    code = 'auth_required';
+  } else if (lower.includes('not found') || safeStatus === 404) {
+    type = 'invalid_request_error';
+    code = 'model_not_found';
+  } else if (typeof err.code === 'string' &&
+             ['ttft_timeout', 'stream_timeout', 'stream_interrupted'].includes(err.code as string)) {
+    // Preserve structured codes raised by the supervisor so agents can
+    // distinguish timeouts/stalls from generic provider failures.
+    code = err.code as string;
+    type = code.includes('timeout') ? 'timeout' : 'invalid_request_error';
+  }
+  return { status: safeStatus, type, code, message };
+}
 
 // OpenAI-compatible chat completions
 import { supervisedHandleChat } from './src/supervisedExecutor.js';

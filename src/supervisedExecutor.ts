@@ -2,9 +2,10 @@
  * SupervisedExecutor — Transparent auto-retry guard for LLM sessions.
  *
  * Wraps handleChat with:
- * - Heartbeat monitoring via AbortController (5s silent threshold)
+ * - Two-phase watchdog (TTFT window before first chunk, stall window after)
+ * - Client-abort propagation (stops pulling upstream on disconnect)
  * - Single transparent retry before bubbling 503 to client (TTFT-guard)
- * - Circuit-breaker: marks provider "fragile" after 3 consecutive stalls
+ * - Circuit-breaker: marks provider "fragile" after N consecutive stalls
  *
  * This lives in 9router-api as an enhancement layer; 9router core stays untouched.
  */
@@ -12,14 +13,24 @@
 import { handleChat } from '../src/exports.js';
 import { markAccountUnavailable, clearAccountError } from '../src/exports.js';
 
-// Heartbeat: upstream must emit data within HEARTBEAT_MS or we treat it as a stall
-const HEARTBEAT_MS = 5000;
+// Watchdog policy (env-injectable for tests). Two phases so slow-but-healthy
+// streams are never cancelled: reasoning models can legitimately take >5s for
+// the first token and stay silent for long stretches between tokens.
+const DEFAULT_TTFT_MS = 60_000; // max wait for the FIRST transformed chunk
+const DEFAULT_STALL_MS = 120_000; // max silence AFTER at least one chunk
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000; // handleChat() must resolve within this (TTFT hang guard)
+const DEFAULT_FRAGILE_THRESHOLD = 3; // stalls before marking provider fragile
+const STALL_COUNTER_TTL_MS = 5 * 60_000; // reset stall counts after 5 min
 
 // Maximum transparent retries per request before bubbling error to client
 const MAX_RETRIES = 1;
 
-// Consecutive stalls before marking provider connection as "fragile"
-const FRAGILE_THRESHOLD = 3;
+const cfg = () => ({
+  ttftMs: Number(process.env.SUPERVISED_TTFT_MS || DEFAULT_TTFT_MS),
+  stallMs: Number(process.env.SUPERVISED_STALL_MS || DEFAULT_STALL_MS),
+  requestTimeoutMs: Number(process.env.SUPERVISED_REQUEST_TIMEOUT_MS || DEFAULT_REQUEST_TIMEOUT_MS),
+  fragileThreshold: Number(process.env.SUPERVISED_FRAGILE_THRESHOLD || DEFAULT_FRAGILE_THRESHOLD),
+});
 
 /** In-memory stall counter per connectionId */
 const stallCounters = new Map(); // connectionId -> { count: number, lastStall: number }
@@ -38,11 +49,14 @@ function isStreamingResponse(response) {
 function recordStall(connectionId: string | null) {
   if (!connectionId) return;
   const entry = stallCounters.get(connectionId) || { count: 0, lastStall: 0 };
+  const now = Date.now();
+  // Reset the counter if the previous stall is older than the TTL window.
+  if (entry.lastStall && now - entry.lastStall > STALL_COUNTER_TTL_MS) entry.count = 0;
   entry.count++;
-  entry.lastStall = Date.now();
+  entry.lastStall = now;
   stallCounters.set(connectionId, entry);
 
-  if (entry.count >= FRAGILE_THRESHOLD) {
+  if (entry.count >= cfg().fragileThreshold) {
     console.warn(`[SupervisedExecutor] Connection ${connectionId} flagged FRAGILE after ${entry.count} stalls`);
     // Mark as temporarily unavailable in 9router DB (async, non-blocking)
     markAccountUnavailable(connectionId, 60_000).catch(() => {});
@@ -61,6 +75,20 @@ function recordSuccess(connectionId: string | null) {
   }
   // Clear any fragility flag on success
   clearAccountError(connectionId).catch(() => {});
+}
+
+/**
+ * Enqueue a structured SSE error event before the stream terminates.
+ * Matches OpenAI's error envelope so agents can classify the failure
+ * (provider down vs timeout vs auth) instead of seeing a silent EOF.
+ */
+function sendSseError(controller, message: string, type = 'upstream_error', code = 'stream_interrupted') {
+  try {
+    const payload = JSON.stringify({ error: { message, type, code } });
+    controller.enqueue(new TextEncoder().encode(`data: ${payload}\n\n`));
+  } catch {
+    // Controller already closed/errored — nothing to surface.
+  }
 }
 
 /**
@@ -92,29 +120,66 @@ export async function supervisedHandleChat(webRequest) {
       return response;
     }
 
-    const stream = new ReadableStream({
-      async start(controller) {
-        const reader = body.getReader();
-        let heartbeatTimer: ReturnType<typeof setTimeout>;
-        let chunksReceived = 0;
+    const { ttftMs, stallMs } = cfg();
+    const signal = (webRequest as { signal?: AbortSignal })?.signal;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
 
-        const resetHeartbeat = () => {
-          clearTimeout(heartbeatTimer);
-          heartbeatTimer = setTimeout(() => {
-            reader.cancel().catch(() => {});
-          }, HEARTBEAT_MS);
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        reader = body.getReader();
+        let chunksReceived = 0;
+        let watchdogTimer: ReturnType<typeof setTimeout>;
+
+        const clearWatchdog = () => clearTimeout(watchdogTimer);
+
+        // Two-phase watchdog: the TTFT window applies before the first chunk
+        // (reasoning models can take >5s to first token), the stall window
+        // applies afterwards (long thinking silences are normal). Neither
+        // fires on slow-but-healthy streams.
+        const scheduleWatchdog = () => {
+          clearWatchdog();
+          const window = chunksReceived === 0 ? ttftMs : stallMs;
+          watchdogTimer = setTimeout(() => {
+            // Upstream stalled past the window. Surface a timeout error event
+            // instead of silently cancelling, and record the stall so the
+            // circuit breaker can eventually trip.
+            sendSseError(controller, 'upstream stalled: no data within watchdog window', 'timeout', 'stream_timeout');
+            recordStall(connectionId);
+            reader?.cancel().catch(() => {});
+          }, window);
         };
 
-        resetHeartbeat();
+        const onAbort = () => {
+          // Client disconnected: stop pulling upstream quietly (no error frame,
+          // and definitely NOT a provider stall).
+          clearWatchdog();
+          reader?.cancel().catch(() => {});
+        };
+
+        scheduleWatchdog();
+
+        if (signal) {
+          if (signal.aborted) {
+            onAbort();
+          } else {
+            signal.addEventListener('abort', onAbort, { once: true });
+          }
+        }
 
         try {
           while (true) {
             let result;
             try {
               result = await reader.read();
-            } catch (readErr) { break; }
+            } catch (readErr) {
+              if (signal?.aborted) break; // client abort — no error frame
+              // Upstream read failed mid-stream: surface it rather than EOF.
+              const msg = String((readErr as Error)?.message || readErr);
+              sendSseError(controller, `upstream read failed: ${msg}`, 'upstream_error', 'stream_interrupted');
+              break;
+            }
 
-            clearTimeout(heartbeatTimer);
+            clearWatchdog();
 
             if (result.done) break;
 
@@ -122,13 +187,24 @@ export async function supervisedHandleChat(webRequest) {
             controller.enqueue(result.value);
 
             if (chunksReceived === 1) recordSuccess(connectionId);
-            resetHeartbeat();
+            scheduleWatchdog();
           }
         } catch (err) {
+          if (!signal?.aborted) {
+            // Unexpected pump error: surface a structured error event.
+            const msg = String((err as Error)?.message || err);
+            sendSseError(controller, `upstream stream error: ${msg}`, 'upstream_error', 'stream_interrupted');
+          }
         } finally {
-          clearTimeout(heartbeatTimer);
+          clearWatchdog();
+          if (signal) signal.removeEventListener('abort', onAbort);
           try { controller.close(); } catch {}
         }
+      },
+      cancel() {
+        // Server-side reader.cancel() (e.g. client abort propagation) stops
+        // the upstream pump immediately.
+        reader?.cancel().catch(() => {});
       },
     });
 
@@ -138,17 +214,54 @@ export async function supervisedHandleChat(webRequest) {
     });
   };
 
+  // TTFT hang guard: handleChat() must resolve within the request timeout, or
+  // we surface a structured retryable timeout instead of hanging forever when
+  // the upstream accepts the connection but never produces a response.
+  const executeWithTimeout = async () => {
+    const { requestTimeoutMs } = cfg();
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const timeoutError = Object.assign(
+      new Error('upstream did not respond within the request timeout'),
+      { status: 503, code: 'ttft_timeout', type: 'timeout' },
+    ) as Error & { status: number; code: string; type: string };
+
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        reject(timeoutError);
+      }, requestTimeoutMs);
+    });
+
+    const execPromise = execute();
+    // If the request times out, cancel a late-arriving response so the
+    // upstream stream is not left draining after we already errored.
+    execPromise.then((res) => {
+      if (timedOut) res?.body?.cancel?.().catch?.(() => {});
+    }).catch(() => {});
+
+    try {
+      const result = await Promise.race([execPromise, timeoutPromise]);
+      clearTimeout(timer);
+      return result;
+    } catch (err) {
+      clearTimeout(timer);
+      throw err;
+    }
+  };
+
   try {
-    return await execute();
+    return await executeWithTimeout();
   } catch (firstError) {
     if (!isRetryableError(firstError) || retryCount >= MAX_RETRIES) {
       recordStall(connectionId);
       throw firstError;
     }
     retryCount++;
-    console.warn(`[SupervisedExecutor] Retryable error: ${firstError.message}, retrying...`);
+    console.warn(`[SupervisedExecutor] Retryable error: ${(firstError as Error).message}, retrying...`);
     try {
-      return await execute();
+      return await executeWithTimeout();
     } catch (retryError) {
       recordStall(connectionId);
       throw retryError;
