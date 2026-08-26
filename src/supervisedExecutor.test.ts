@@ -103,6 +103,7 @@ describe('supervisedHandleChat', () => {
       async start(controller) {
         await new Promise(r => setTimeout(r, 6200));
         controller.enqueue(new TextEncoder().encode('data: chunk1\n\n'));
+        controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
         controller.close();
       },
     });
@@ -113,6 +114,7 @@ describe('supervisedHandleChat', () => {
     const joined = await readAll(res);
     expect(joined).toContain('data: chunk1');
     expect(joined).not.toContain('stream_timeout');
+    expect(joined).not.toContain('stream_interrupted');
   }, 15_000);
 
   it('should reject with ttft_timeout when handleChat never resolves (TTFT hang guard)', async () => {
@@ -181,4 +183,21 @@ describe('supervisedHandleChat', () => {
     expect(joined).toContain('stream_timeout');
     expect(exports.markAccountUnavailable).toHaveBeenCalledWith('conn-1', 60_000);
   }, 15_000);
+
+  it('should emit SSE error event when upstream stream ends prematurely (no [DONE] signal)', async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: chunk1\n\n'));
+        controller.close(); // Closed without "data: [DONE]"
+      },
+    });
+
+    vi.mocked(exports.handleChat).mockResolvedValue(streamingResponse(stream));
+
+    const res = await supervisedHandleChat(plainReq());
+    const joined = await readAll(res);
+    expect(joined).toContain('data: chunk1');
+    expect(joined).toContain('stream_interrupted');
+    expect(joined).toContain('upstream stream ended without SSE termination signal');
+  });
 });

@@ -167,6 +167,7 @@ export async function supervisedHandleChat(webRequest) {
         }
 
         try {
+          let doneReceived = false;
           while (true) {
             let result;
             try {
@@ -181,7 +182,23 @@ export async function supervisedHandleChat(webRequest) {
 
             clearWatchdog();
 
-            if (result.done) break;
+            if (result.done) {
+              // EOF reached: verify SSE termination signal was received.
+              // SSE streams MUST end with "data: [DONE]" per the protocol.
+              // Premature EOF indicates upstream corruption or network issue.
+              // Skip the check on client abort — the stream is being cancelled
+              // intentionally and should not produce an error frame.
+              if (!doneReceived && !signal?.aborted) {
+                sendSseError(controller, 'upstream stream ended without SSE termination signal', 'upstream_error', 'stream_interrupted');
+              }
+              break;
+            }
+
+            // Check if this chunk contains the SSE termination signal.
+            const chunkStr = new TextDecoder().decode(result.value, { stream: true });
+            if (chunkStr.includes('data: [DONE]')) {
+              doneReceived = true;
+            }
 
             chunksReceived++;
             controller.enqueue(result.value);
