@@ -184,11 +184,11 @@ describe('supervisedHandleChat', () => {
     expect(exports.markAccountUnavailable).toHaveBeenCalledWith('conn-1', 60_000);
   }, 15_000);
 
-  it('should emit SSE error event when upstream stream ends prematurely (no [DONE] signal)', async () => {
+  it('should emit SSE error event when upstream stream ends prematurely (no termination signal)', async () => {
     const stream = new ReadableStream({
       start(controller) {
         controller.enqueue(new TextEncoder().encode('data: chunk1\n\n'));
-        controller.close(); // Closed without "data: [DONE]"
+        controller.close(); // Closed without "data: [DONE]" or a finish_reason chunk
       },
     });
 
@@ -199,5 +199,44 @@ describe('supervisedHandleChat', () => {
     expect(joined).toContain('data: chunk1');
     expect(joined).toContain('stream_interrupted');
     expect(joined).toContain('upstream stream ended without SSE termination signal');
+  });
+
+  it('should NOT emit stream_interrupted when upstream ends with a finish_reason chunk (no [DONE])', async () => {
+    // Healthy translated streams (openai→claude, openai→gemini) complete with
+    // a finish_reason chunk and never send literal "data: [DONE]". Ending on
+    // finish_reason is a normal terminal, not an interruption.
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}\n\n'));
+        controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'));
+        controller.close(); // No "data: [DONE]"
+      },
+    });
+
+    vi.mocked(exports.handleChat).mockResolvedValue(streamingResponse(stream));
+
+    const res = await supervisedHandleChat(plainReq());
+    const joined = await readAll(res);
+    expect(joined).toContain('"finish_reason":"stop"');
+    expect(joined).not.toContain('stream_interrupted');
+    expect(joined).not.toContain('stream_timeout');
+  });
+
+  it('should detect a finish_reason marker split across chunk boundaries', async () => {
+    // Marker detection accumulates decoded text over a rolling tail, so a key
+    // split mid-way across chunks must still be recognized as a terminal.
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{},"finish'));
+        controller.enqueue(new TextEncoder().encode('_reason":"stop"}]}\n\n'));
+        controller.close(); // No "data: [DONE]"
+      },
+    });
+
+    vi.mocked(exports.handleChat).mockResolvedValue(streamingResponse(stream));
+
+    const res = await supervisedHandleChat(plainReq());
+    const joined = await readAll(res);
+    expect(joined).not.toContain('stream_interrupted');
   });
 });

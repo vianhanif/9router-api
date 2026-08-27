@@ -167,7 +167,14 @@ export async function supervisedHandleChat(webRequest) {
         }
 
         try {
-          let doneReceived = false;
+          let terminationSeen = false;
+          // Rolling tail of decoded SSE text so a terminal marker split across
+          // chunk boundaries (`data: [DONE]` or a `"finish_reason"` payload)
+          // still counts. [DONE] alone is NOT a reliable signal in this
+          // provider ecosystem — a healthy OpenAI-format stream ends with a
+          // finish_reason chunk and often never sends [DONE].
+          let sseTextTail = '';
+          const decoder = new TextDecoder();
           while (true) {
             let result;
             try {
@@ -183,21 +190,28 @@ export async function supervisedHandleChat(webRequest) {
             clearWatchdog();
 
             if (result.done) {
-              // EOF reached: verify SSE termination signal was received.
-              // SSE streams MUST end with "data: [DONE]" per the protocol.
-              // Premature EOF indicates upstream corruption or network issue.
-              // Skip the check on client abort — the stream is being cancelled
-              // intentionally and should not produce an error frame.
-              if (!doneReceived && !signal?.aborted) {
+              // EOF reached: verify a SSE termination signal was received.
+              // The stream terminates normally if either `data: [DONE]` was
+              // seen or a chunk carried a `finish_reason` (translated streams
+              // emit finish_reason and never send [DONE]). Only when EOF
+              // arrives with neither — and the client did not abort — flag it
+              // as an upstream interruption.
+              if (!terminationSeen && !signal?.aborted) {
                 sendSseError(controller, 'upstream stream ended without SSE termination signal', 'upstream_error', 'stream_interrupted');
               }
               break;
             }
 
-            // Check if this chunk contains the SSE termination signal.
-            const chunkStr = new TextDecoder().decode(result.value, { stream: true });
-            if (chunkStr.includes('data: [DONE]')) {
-              doneReceived = true;
+            // Accumulate decoded text so markers split across chunk boundaries
+            // are still detected; cap the tail once a marker cannot appear in
+            // the discarded prefix anymore.
+            sseTextTail += decoder.decode(result.value, { stream: true });
+            if (!terminationSeen &&
+                (sseTextTail.includes('data: [DONE]') || /"finish_reason"\s*:\s*"[^"]*"/.test(sseTextTail))) {
+              terminationSeen = true;
+              sseTextTail = '';
+            } else if (sseTextTail.length > 16384) {
+              sseTextTail = sseTextTail.slice(-16384);
             }
 
             chunksReceived++;
