@@ -1,0 +1,74 @@
+name: 9router
+
+networks:
+  9router-net:
+    driver: bridge
+
+services:
+  9router:
+    image: decolua/9router:latest
+    container_name: 9router
+    restart: unless-stopped
+    env_file: ./env/9router.env
+    environment:
+      DATA_DIR: /app/data
+      PORT: "20128"
+      HOSTNAME: 0.0.0.0
+      NODE_ENV: production
+    volumes:
+      - ./data/9router:/app/data
+      - ./data-home/9router-home:/app/data-home
+    networks: [9router-net]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:20128/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  9router-api:
+    build:
+      context: ./src/9router-api
+      dockerfile: Dockerfile
+    container_name: 9router-api
+    restart: unless-stopped
+    env_file: ./env/9router-api.env
+    environment:
+      PORT: "20127"
+      NODE_ENV: production
+      NINEROUTER_HOME: /app/9router
+    volumes:
+      - ./data/9router:/app/data
+      - ./data-home/9router-home:/app/data-home
+    depends_on:
+      9router: { condition: service_healthy }
+    networks: [9router-net]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:20127/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  caddy:
+    image: caddy:alpine
+    container_name: caddy
+    restart: unless-stopped
+    env_file: ./env/caddy.env
+    volumes:
+      - ./proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+    networks: [9router-net]
+    depends_on:
+      9router: { condition: service_healthy }
+      9router-api: { condition: service_healthy }
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    restart: unless-stopped
+    volumes:
+      - ./cloudflared:/etc/cloudflared:ro
+    command: tunnel --config /etc/cloudflared/config.yml run
+    networks: [9router-net]
+    depends_on:
+      caddy: { condition: service_healthy }

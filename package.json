@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "tsx server.ts",
-    "build": "esbuild server.ts --bundle --platform=node --outfile=dist/server.js --format=esm --external:9router --external:bun:sqlite --external:better-sqlite3",
+    "build": "esbuild server.ts --bundle --platform=node --outfile=dist/server.js --format=esm --external:9router --external:open-sse --external:@/* --external:bun:sqlite --external:better-sqlite3 --external:express --external:body-parser --external:debug",
     "dev": "tsx watch server.ts"
   },
   "dependencies": {
