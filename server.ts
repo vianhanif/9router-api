@@ -306,6 +306,12 @@ app.options('/v1/chat/completions', (req, res) => {
   res.sendStatus(200);
 });
 
+// OpenAI-compatible responses (Codex CLI 0.151+ uses wire_api="responses").
+// Core 9router detects the Responses format via the URL path, so the same
+// handleChat handler dispatches to the correct translator.
+app.post('/v1/responses', (req, res) => wrapExpressRequest(req, res, supervisedHandleChat));
+app.options('/v1/responses', (req, res) => res.sendStatus(200));
+
 // OpenAI-compatible models list
 app.get('/v1/models', async (req, res) => {
   // TODO: Wire up models handler from 9router
@@ -399,7 +405,14 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 
 // === Start Server ===
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[9Router API] Running on port ${PORT} (api-only mode)`);
-  void startHeadroomIfEnabled();
-});
+// Export the Express app so tests can import it without binding a port.
+export { app };
+
+// Only auto-listen when run directly (not when imported by a test runner).
+// Vitest sets NODE_ENV=test; guard against binding a real port during tests.
+if (process.env.NODE_ENV !== 'test') {
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[9Router API] Running on port ${PORT} (api-only mode)`);
+    void startHeadroomIfEnabled();
+  });
+}
