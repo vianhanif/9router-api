@@ -205,9 +205,17 @@ export async function supervisedHandleChat(webRequest) {
             // Accumulate decoded text so markers split across chunk boundaries
             // are still detected; cap the tail once a marker cannot appear in
             // the discarded prefix anymore.
-            sseTextTail += decoder.decode(result.value, { stream: true });
+          sseTextTail += decoder.decode(result.value, { stream: true });
+            // Termination markers: `data: [DONE]` for Chat-format streams, a
+            // `finish_reason` chunk (translated streams emit it, never [DONE]),
+            // or a Responses-API completion event (`response.completed` /
+            // `response.failed`) which native Responses passthrough streams
+            // send instead of [DONE]/finish_reason.
             if (!terminationSeen &&
-                (sseTextTail.includes('data: [DONE]') || /"finish_reason"\s*:\s*"[^"]*"/.test(sseTextTail))) {
+                (sseTextTail.includes('data: [DONE]') ||
+                 sseTextTail.includes('response.completed') ||
+                 sseTextTail.includes('response.failed') ||
+                 /"finish_reason"\s*:\s*"[^"]*"/.test(sseTextTail))) {
               terminationSeen = true;
               sseTextTail = '';
             } else if (sseTextTail.length > 16384) {
