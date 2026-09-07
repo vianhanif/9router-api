@@ -239,4 +239,41 @@ describe('supervisedHandleChat', () => {
     const joined = await readAll(res);
     expect(joined).not.toContain('stream_interrupted');
   });
+
+  it('should NOT emit stream_interrupted when upstream ends with response.completed (Responses API)', async () => {
+    // Native Responses-API streams terminate with `response.completed` instead
+    // of `data: [DONE]` or a finish_reason chunk. This is the normal terminal
+    // for /v1/responses passthrough.
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Hello"}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}\n\n'));
+        controller.close(); // No "data: [DONE]"
+      },
+    });
+
+    vi.mocked(exports.handleChat).mockResolvedValue(streamingResponse(stream));
+
+    const res = await supervisedHandleChat(plainReq());
+    const joined = await readAll(res);
+    expect(joined).toContain('response.completed');
+    expect(joined).not.toContain('stream_interrupted');
+  });
+
+  it('should NOT emit stream_interrupted when upstream ends with response.failed (Responses API)', async () => {
+    // response.failed is the failure terminal for Responses-API streams.
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('event: response.failed\ndata: {"type":"response.failed","response":{"id":"resp_1","status":"failed"}}\n\n'));
+        controller.close();
+      },
+    });
+
+    vi.mocked(exports.handleChat).mockResolvedValue(streamingResponse(stream));
+
+    const res = await supervisedHandleChat(plainReq());
+    const joined = await readAll(res);
+    expect(joined).toContain('response.failed');
+    expect(joined).not.toContain('stream_interrupted');
+  });
 });
