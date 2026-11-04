@@ -53,6 +53,36 @@ describe('GET /v1/models (proxy to core 9router)', () => {
     });
   });
 
+  it('forwards x-api-key to core', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(upstreamBody), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await request(app).get('/v1/models').set('x-api-key', 'sk-x-api-key');
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect((init as RequestInit).headers).toMatchObject({ 'x-api-key': 'sk-x-api-key' });
+  });
+
+  it('forwards x-goog-api-key to core', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(upstreamBody), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await request(app).get('/v1/models').set('x-goog-api-key', 'goog-key');
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect((init as RequestInit).headers).toMatchObject({ 'x-goog-api-key': 'goog-key' });
+  });
+
   it('propagates a 401 from core with core error body', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ error: 'API key required for remote API access' }), {

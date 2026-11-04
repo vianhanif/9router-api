@@ -23,7 +23,7 @@ in core 9router (`src/app/api/v1/models/route.js`, served at `/v1/models` and
 
 ## Change
 - `server.ts`: `/v1/models` now proxies `GET ${NINEROUTER_CORE_URL}/v1/models<raw querystring>`.
-  - `authorization` forwarded verbatim so core enforces the key and per-key model filtering.
+  - `authorization`, `x-api-key`, `x-goog-api-key` forwarded verbatim (`?key=` rides the querystring) so core enforces the key and per-key model filtering.
   - Raw querystring forwarded untouched (repeated `?capability=` params survive).
   - Upstream status + JSON body mirrored verbatim (so 400/401 envelopes reach the caller).
   - Non-JSON response, network error, or 5s timeout (`AbortSignal.timeout`) → `503`

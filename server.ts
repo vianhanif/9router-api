@@ -330,11 +330,18 @@ const MODELS_PROXY_TIMEOUT_MS = 5000;
 app.get('/v1/models', async (req, res) => {
   // Forward the raw querystring (repeated ?capability=a&capability=b must
   // survive: re-serializing a parsed object would collapse them) and the
-  // caller's key verbatim so core enforces auth + per-key model filtering.
+  // caller's key verbatim in any of core's supported forms (`Authorization:
+  // Bearer`, `x-api-key`, `x-goog-api-key`, `?key=`) so core enforces auth +
+  // per-key model filtering.
   const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+  const headers: Record<string, string> = {};
+  for (const name of ['authorization', 'x-api-key', 'x-goog-api-key']) {
+    const value = req.headers[name];
+    if (typeof value === 'string') headers[name] = value;
+  }
   try {
     const upstream = await fetch(`${NINEROUTER_CORE_URL}/v1/models${qs}`, {
-      headers: req.headers.authorization ? { authorization: req.headers.authorization } : {},
+      headers,
       signal: AbortSignal.timeout(MODELS_PROXY_TIMEOUT_MS),
     });
     const contentType = upstream.headers.get('content-type') || '';
