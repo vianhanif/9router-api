@@ -312,15 +312,51 @@ app.options('/v1/chat/completions', (req, res) => {
 app.post('/v1/responses', (req, res) => wrapExpressRequest(req, res, supervisedHandleChat));
 app.options('/v1/responses', (req, res) => res.sendStatus(200));
 
-// OpenAI-compatible models list
+// Base URL of core 9router on the compose network (service name `9router`,
+// port 20128). Override with NINEROUTER_CORE_URL when running outside compose.
+const NINEROUTER_CORE_URL =
+  (process.env.NINEROUTER_CORE_URL || 'http://9router:20128').replace(/\/+$/, '');
+const MODELS_PROXY_TIMEOUT_MS = 5000;
+
+// OpenAI-compatible models list — proxied to core 9router.
+//
+// INVARIANT: core 9router is the single source of truth for model lists
+// (combos + provider models, per-key restrictions, capability/kind filters).
+// Do NOT reintroduce a static list here: a hardcoded stub is what made clients
+// see one bogus `gpt-4o` while core served 85 models.
+//
+// ponytail: deliberate ceiling — one extra HTTP hop, no cache, no retries.
+// Add a short-TTL cache only if core restarts prove disruptive to clients.
 app.get('/v1/models', async (req, res) => {
-  // TODO: Wire up models handler from 9router
-  res.json({
-    object: 'list',
-    data: [
-      { id: 'gpt-4o', object: 'model', created: 1699899999, owned_by: 'openai' },
-    ],
-  });
+  // Forward the raw querystring (repeated ?capability=a&capability=b must
+  // survive: re-serializing a parsed object would collapse them) and the
+  // caller's key verbatim in any of core's supported forms (`Authorization:
+  // Bearer`, `x-api-key`, `x-goog-api-key`, `?key=`) so core enforces auth +
+  // per-key model filtering.
+  const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+  const headers: Record<string, string> = {};
+  for (const name of ['authorization', 'x-api-key', 'x-goog-api-key']) {
+    const value = req.headers[name];
+    if (typeof value === 'string') headers[name] = value;
+  }
+  try {
+    const upstream = await fetch(`${NINEROUTER_CORE_URL}/v1/models${qs}`, {
+      headers,
+      signal: AbortSignal.timeout(MODELS_PROXY_TIMEOUT_MS),
+    });
+    const contentType = upstream.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      throw new Error(`upstream returned non-JSON (${upstream.status} ${contentType})`);
+    }
+    // Mirror status + JSON body verbatim so 400/401 envelopes reach the caller.
+    res.status(upstream.status).type(contentType).send(await upstream.text());
+  } catch (error) {
+    console.error('[Models Proxy]', (error as Error).message);
+    if (res.headersSent || res.writableEnded) return;
+    res.status(503).json({
+      error: { message: 'Model list unavailable', type: 'service_unavailable' },
+    });
+  }
 });
 
 // === MCP Gateway ===
